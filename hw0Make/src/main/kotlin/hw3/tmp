@@ -1,0 +1,277 @@
+package hw3
+
+import grammar.*
+import hw2.*
+import java.io.BufferedWriter
+import java.io.File
+
+fun <T> merge(vararg lists: List<T>): List<T> {
+    val result = arrayListOf<T>()
+    for (list in lists)
+        result.addAll(list)
+    return result
+}
+
+fun Node.supstitude(letter: String, formula: Node) =
+        getNodeMethod(::Implication, ::Disjunction, ::Conjunction, ::Negation) {
+            if (it == letter) {
+                formula
+            } else
+                Letter(it)
+        }.let {
+            this.it()
+        }
+
+fun List<Node>.supstitudeAll(letter: String, formula: Node) = this.map { it.supstitude(letter, formula) }
+
+val controposition = File("Contraposition.txt").readLines().map(String::parse)
+val addDoubleNot = File("AddDoubleNot.txt").readLines().map(String::parse)
+val noNoNotOr = File("NoNoNotOr.txt").readLines().map(String::parse)
+
+val noNoNotAnd = File("NoNoNotAnd.txt").readLines().map(String::parse)
+val yesNoNotAnd = File("YesNoNotAnd.txt").readLines().map(String::parse)
+val noYesNotAnd = File("NoYesNotAnd.txt").readLines().map(String::parse)
+
+val yesYesCons = File("YesYesCons.txt").readLines().map(String::parse)
+val noYesCons = File("NoYesCons.txt").readLines().map(String::parse)
+val noNoCons = File("NoNoCons.txt").readLines().map(String::parse)
+
+val yesNoNotImpl = File("YesNoNotCons.txt").readLines().map(String::parse)
+
+fun proofAOrNotA(a: Letter): List<Node> = merge(
+        listOf(a impl (a or !a)),
+        controposition.supstitudeAll("B", a),
+        listOf(!a impl (a or !a)),
+        controposition.supstitudeAll("B", !a),
+        listOf(
+                (!(a or !a) impl !a) impl ((!(a or !a) impl !!a) impl (!!(a or !a))),
+                (!(a or !a) impl !!a) impl (!!(a or !a)),
+                !!(a or !a),
+                !!(a or !a) impl (a or !a),
+                a or !a
+        )
+)
+
+val maskToProof = hashMapOf<Int, Proof>()
+
+data class LineProof(val estimation: Boolean, val proof: List<Node>) {
+    val expression get() = proof.last()
+
+    companion object {
+        val noproof = LineProof(false, listOf())
+    }
+}
+
+fun Node.withEstimation(est: Boolean) = if (est) this else !this
+
+fun Node.estimated() = withEstimation(this.estimate())
+
+val estimate = getNodeMethod(
+        implication = { a, b -> !a || b },
+        disjunction = Boolean::or,
+        conjunction = Boolean::and,
+        negation = Boolean::not,
+        letter = { values[it]!! }
+)
+
+fun proofBin(
+        bin: Binary,
+        formula: (a: Boolean, b: Boolean) -> Boolean,
+        formulaProofGen: (Boolean, Boolean) -> List<Node>
+): LineProof {
+    val (left, right) = Pair(dfsProof(bin.left), dfsProof(bin.right))
+    val estimation = formula(left.estimation, right.estimation)
+    val f = formulaProofGen(left.estimation, right.estimation)
+    val supstAB = f
+            .supstitudeAll("A", bin.left)
+            .supstitudeAll("B", bin.right)
+    return LineProof(
+            estimation = estimation,
+            proof = merge(
+                    left.proof,
+                    right.proof,
+                    supstAB
+            )
+    )
+}
+
+fun dfsProof(phiNoEst: Node): LineProof {
+    val phi = phiNoEst.withEstimation(phiNoEst.estimate())
+    return when (phi) {
+        is Implication -> proofBin(phi, { a, b -> !a || b }, { a, b ->
+            if (a && b)
+                yesYesCons
+            else if (!a && !b)
+                noNoCons
+            else
+                noYesCons
+        }) // 3
+        is Conjunction -> proofBin(phi, Boolean::and, { _, _ ->
+            listOf(
+                    Letter("A") impl (Letter("B") impl (Letter("A") and Letter("B"))),
+                    Letter("B") impl (Letter("A") and Letter("B")),
+                    Letter("A") and Letter("B")
+            )
+        }) // 1
+        is Disjunction -> proofBin(phi, Boolean::or, { a, b ->
+            listOf(
+                    (if (a) Letter("A") else Letter("B")) impl (Letter("A") or Letter("B")),
+                    Letter("A") or Letter("B")
+            )
+        }) // 3
+        is Negation -> when (phi.child) {
+            is Letter -> {
+                val letterProof = phi.child.estimated()
+                LineProof(!letterProof.estimate(), listOf(letterProof))
+            }
+            is Negation -> {
+                val expr = phi.child.child
+                val exprProof = dfsProof(expr)
+                LineProof(
+                        estimation = exprProof.estimation,
+                        proof = merge(
+                                exprProof.proof,
+                                addDoubleNot.supstitudeAll("A", expr)
+                        )
+                )
+            } // 1
+            is Disjunction -> proofBin(phi.child, { a, b -> !(a || b) }, { _, _ -> noNoNotOr }) //1
+            is Conjunction -> proofBin(phi.child, { a, b -> !(a && b) }, { a, b ->
+                if (!a && !b)
+                    noNoNotAnd
+                else if (!a)
+                    yesNoNotAnd
+                else
+                    noYesNotAnd
+            }) // 3
+            is Implication -> proofBin(phi.child, { a, b -> !(!a || b) }, { _, _ -> yesNoNotImpl }) // 1
+            else -> LineProof.noproof
+        }
+        is Letter -> {
+            if (values[phi.letter]!!)
+                LineProof(true, listOf(Letter(phi.letter)))
+            else
+                LineProof(false, listOf(!Letter(phi.letter)))
+        }
+        else -> LineProof.noproof
+    }.also {
+        println("proofing : ${phi.text()}")
+        println("proof : \n${it.proof.map { "* " + it.text() + " *" }.joinToString("\n")}")
+    }
+}
+
+fun proofFormulaWithFixedValues(assumptionsMask: Int, phi: Node): Proof {
+    if (!maskToProof.containsKey(assumptionsMask)) {
+        val assumptions = assumptionsMask.fillValues()
+        maskToProof[assumptionsMask] = Proof(Header(assumptions, phi), dfsProof(phi).proof)
+    }
+    return maskToProof[assumptionsMask]!!
+}
+
+fun proofFormula(phi: Node)
+        : Proof {
+    for (maskSize in vars.size - 1 downTo 0) {
+        for (maskPrefix in 0 until (1 shl maskSize)) {
+            val lastVarMask = (1 shl maskSize)
+            // [x1]^x1...[x[k-1]]^x[k-1] |- xk -> phi
+            val proofTrue = proofFormulaWithFixedValues(
+                    maskPrefix + lastVarMask,//merge(assumptions, listOf(lastVar)),
+                    phi
+            ).also {
+                println("assumptions : ${it.header.assumptions.map { it.text() }.joinToString(",  ")}")
+                println("expression : ${it.header.expression.text()}")
+                println("proof  : \n${it.proof.map { it.text() }.joinToString("\n", "\n")}")
+            }.transform()
+            // [x1]^x1...[x[k-1]]^x[k-1] |- !xk ->phi
+            val proofFalse = proofFormulaWithFixedValues(
+                    maskPrefix,//merge(assumptions, listOf(Negation(lastVar))),
+                    phi
+            ).transform()
+            val assumptions = maskPrefix.fillValues(length = maskSize)
+            val lastVar = Letter(vars[maskSize])
+            // xk -> phi
+            // !xk ->phi
+            // (xk -> phi) -> (!xk ->phi) -> (xk || !xk ->phi)
+            // (!xk ->phi) -> (xk || !xk ->phi)
+            // xk || !xk -> phi
+            maskToProof[maskPrefix] = Proof(
+                    Header(
+                            assumptions = assumptions,
+                            expression = phi
+                    ),
+                    proof = merge(
+                            proofFalse.proof,
+                            proofTrue.proof,
+                            listOf(
+                                    (lastVar impl phi) impl ((!lastVar impl phi) impl ((lastVar or !lastVar) impl phi)),
+                                    (!lastVar impl phi) impl ((lastVar or !lastVar) impl phi),
+                                    (lastVar or !lastVar) impl phi,
+                                    // lastVar or !lastVar - already proofed
+                                    phi
+                            )
+                    )
+            )
+        }
+    }
+    return maskToProof[0]!!
+}
+
+fun solve(header: String, output: BufferedWriter) {
+    val (assumptions, expression) = getHeader(header, "|=")
+    val nothing = { _: Unit, _: Unit -> }
+    val addToVars = getNodeMethod(nothing, nothing, nothing, {}, {
+        if (it !in vars)
+            vars.add(it)
+    })
+    assumptions.forEach(addToVars)
+    expression.addToVars()
+    for (mask in 0 until (1 shl vars.size)) {
+        mask.fillValues()
+        if (assumptions.all(calc)) {
+            if (!expression.calc()) {
+                output.append("Высказывание ложно при ${
+                values.map { "${it.key}=${if (it.value) "И" else "Л"}" }.joinToString(", ")
+                }\n")
+                return
+            }
+        }
+    }
+    output.append(
+            assumptions
+                    .joinToString(",", "", "|-", transform = text)
+                    + expression.text()
+                    + "\n"
+    )
+    var phi = expression
+    for (g in assumptions.reversed())
+        phi = g impl phi
+    vars.map(::Letter).forEach {
+        proofAOrNotA(it).forEach {
+            output.append(it.text())
+        }
+    }
+    proofFormula(phi).printProof(output)
+}
+
+fun main(args: Array<String>) {
+    File("output.txt").bufferedWriter().use { output ->
+        solve(
+                File("input.txt")
+                        .bufferedReader()
+                        .useLines {
+                            it
+                                    .filterNot(String::isEmpty)
+                                    .first()
+                        },
+                output
+        )
+    }
+}
+
+// B->((W)->((A)->(B)))  ????
+// !B
+// !W
+// A
+// A = true
+// B = false
+//
